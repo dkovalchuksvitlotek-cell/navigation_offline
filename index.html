@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#14532d">
+  <meta name="description" content="Офлайн-навігація без GPS: маршрут і голосові підказки крок за кроком з підтвердженням водія">
+  <title>Навігація без GPS</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="bar">
+    <h1>🧭 Навігація без GPS</h1>
+    <span id="map-name" class="muted"></span>
+    <button id="menu-btn" class="icon-btn" aria-label="Налаштування">⚙</button>
+  </header>
+
+  <main id="plan-screen">
+    <div class="map-wrap"><canvas id="map" aria-label="Карта доріг"></canvas>
+      <div id="pick-hint" class="pick-hint" hidden></div>
+    </div>
+
+    <section class="panel">
+      <div id="resume" class="notice" hidden>
+        <span>Є незавершена поїздка.</span>
+        <button id="resume-btn" class="small">Продовжити</button>
+        <button id="resume-drop" class="small ghost">Скасувати</button>
+      </div>
+
+      <fieldset class="point" data-point="from">
+        <legend><span class="dot from"></span>Звідки (де ви стоїте зараз)</legend>
+        <input list="streets" class="street" placeholder="Вулиця" autocomplete="off">
+        <select class="cross" disabled><option value="">— перехрестя з… —</option></select>
+        <button class="pick small ghost" type="button">📍 На карті</button>
+        <div class="chosen muted"></div>
+      </fieldset>
+
+      <button id="swap" class="small ghost swap" type="button" aria-label="Поміняти місцями">⇅ Поміняти</button>
+
+      <fieldset class="point" data-point="to">
+        <legend><span class="dot to"></span>Куди</legend>
+        <input list="streets" class="street" placeholder="Вулиця" autocomplete="off">
+        <select class="cross" disabled><option value="">— перехрестя з… —</option></select>
+        <button class="pick small ghost" type="button">📍 На карті</button>
+        <div class="chosen muted"></div>
+      </fieldset>
+      <datalist id="streets"></datalist>
+
+      <button id="build" class="primary" disabled>Прокласти маршрут</button>
+      <p id="error" class="error" hidden></p>
+
+      <div id="summary" hidden>
+        <h2 id="summary-title"></h2>
+        <ol id="steps" class="steps"></ol>
+        <button id="start" class="primary">▶ Почати навігацію</button>
+      </div>
+    </section>
+  </main>
+
+  <section id="nav-screen" hidden>
+    <div class="nav-top">
+      <span id="nav-progress"></span>
+      <button id="nav-exit" class="icon-btn" aria-label="Завершити">✕</button>
+    </div>
+    <div class="instruction">
+      <div id="nav-icon" class="nav-icon">⬆</div>
+      <div>
+        <div id="nav-headline" class="headline"></div>
+        <div id="nav-detail" class="detail"></div>
+      </div>
+    </div>
+    <p id="nav-text" class="nav-text"></p>
+    <p id="nav-crossings" class="crossings"></p>
+    <div class="map-wrap nav-map"><canvas id="nav-map" aria-label="Поточний крок на карті"></canvas>
+      <div id="nav-pick-hint" class="pick-hint" hidden>Торкніться карти там, де ви зараз</div>
+    </div>
+    <button id="nav-done" class="done">✓ Виконано</button>
+    <div class="nav-actions">
+      <button id="nav-repeat">🔁 Повторити</button>
+      <button id="nav-back">◀ Назад</button>
+      <button id="nav-missed">↷ Проґавив поворот</button>
+      <button id="nav-here">📍 Я в іншому місці</button>
+    </div>
+  </section>
+
+  <dialog id="settings">
+    <form method="dialog">
+      <h2>Налаштування</h2>
+      <label class="row">Карта (файл .json, створений tools/build_graph.py)
+        <input type="file" id="map-file" accept=".json,application/json">
+      </label>
+      <button type="button" id="map-reset" class="small ghost">Повернути демо-карту</button>
+      <label class="row">Швидкість мовлення
+        <input type="range" id="rate" min="0.7" max="1.4" step="0.1" value="1">
+      </label>
+      <label class="check"><input type="checkbox" id="opt-media"> Кнопки гарнітури / керма («наступний трек» = Виконано)</label>
+      <label class="check"><input type="checkbox" id="opt-voice"> Голосові команди («готово», «повтори», «назад») — може потребувати інтернету</label>
+      <p id="voice-warning" class="error" hidden></p>
+      <p class="muted">Також працюють клавіші: пробіл / Enter — «Виконано», Backspace — «Назад», R — «Повторити».</p>
+      <button class="primary">Готово</button>
+    </form>
+  </dialog>
+
+  <script type="module" src="src/app.js"></script>
+</body>
+</html>
