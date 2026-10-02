@@ -61,7 +61,7 @@ def fetch_overpass(bbox, highways):
     """Завантажує одну прямокутну область. Повертає сирий XML (bytes)."""
     s, w, n, e = bbox
     query = (
-        '[out:xml][timeout:300][maxsize:1073741824];'
+        '[out:xml][timeout:180][maxsize:268435456];'
         f'way["highway"~"^({"|".join(highways)})$"]({s:.5f},{w:.5f},{n:.5f},{e:.5f});'
         '(._;>;);out body;'
     )
@@ -76,7 +76,7 @@ def fetch_overpass(bbox, highways):
                 'Content-Type': 'application/x-www-form-urlencoded',
             })
             try:
-                with urllib.request.urlopen(req, timeout=400) as r:
+                with urllib.request.urlopen(req, timeout=240) as r:
                     buf = io.BytesIO()
                     while chunk := r.read(1 << 20):
                         buf.write(chunk)
