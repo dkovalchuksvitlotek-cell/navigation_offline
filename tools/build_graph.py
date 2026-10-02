@@ -16,11 +16,14 @@
 
 import argparse
 import bz2
+import glob
 import gzip
 import io
 import json
 import math
+import os
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -50,55 +53,109 @@ def open_input(path):
     return open(path, 'rb')
 
 
-def download_overpass(bbox, highways, save_to=None):
+class OverpassBusy(Exception):
+    """Усі сервери не впоралися із запитом (504, тайм-аут, ліміт пам'яті)."""
+
+
+def fetch_overpass(bbox, highways):
+    """Завантажує одну прямокутну область. Повертає сирий XML (bytes)."""
     s, w, n, e = bbox
     query = (
-        '[out:xml][timeout:600][maxsize:1073741824];'
-        f'way["highway"~"^({"|".join(highways)})$"]({s},{w},{n},{e});'
+        '[out:xml][timeout:300][maxsize:1073741824];'
+        f'way["highway"~"^({"|".join(highways)})$"]({s:.5f},{w:.5f},{n:.5f},{e:.5f});'
         '(._;>;);out body;'
     )
     data = urllib.parse.urlencode({'data': query}).encode()
     errors = []
     for url in OVERPASS_URLS:
         host = urllib.parse.urlparse(url).netloc
-        print(f'Завантаження з {host}… (для великого міста це може тривати кілька хвилин)', file=sys.stderr)
-        req = urllib.request.Request(url, data=data, headers={
-            'User-Agent': USER_AGENT,
-            'Accept': '*/*',
-            'Content-Type': 'application/x-www-form-urlencoded',
-        })
+        for attempt in range(2):
+            req = urllib.request.Request(url, data=data, headers={
+                'User-Agent': USER_AGENT,
+                'Accept': '*/*',
+                'Content-Type': 'application/x-www-form-urlencoded',
+            })
+            try:
+                with urllib.request.urlopen(req, timeout=400) as r:
+                    buf = io.BytesIO()
+                    while chunk := r.read(1 << 20):
+                        buf.write(chunk)
+                        print(f'\r    {host}: отримано {buf.tell() / 1e6:.1f} МБ', end='', file=sys.stderr)
+                    print(file=sys.stderr)
+            except urllib.error.HTTPError as err:
+                if err.code == 429 and attempt == 0:
+                    print(f'    {host}: забагато запитів, чекаю 30 с…', file=sys.stderr)
+                    time.sleep(30)
+                    continue
+                hint = {429: 'забагато запитів', 504: 'сервер не встиг обробити запит',
+                        400: 'помилка в запиті'}.get(err.code, err.reason)
+                print(f'    {host}: HTTP {err.code} ({hint})', file=sys.stderr)
+                errors.append(f'{host}: HTTP {err.code}')
+                break
+            except (urllib.error.URLError, TimeoutError, OSError) as err:
+                print(f'    {host}: {err}', file=sys.stderr)
+                errors.append(f'{host}: {err}')
+                break
+            raw = buf.getvalue()
+            # При перевищенні ліміту Overpass повертає XML із <remark> замість даних.
+            if b'<remark>' in raw[-2000:] and b'<way' not in raw:
+                remark = raw[raw.rfind(b'<remark>') + 8:raw.rfind(b'</remark>')].decode(errors='replace').strip()
+                print(f'    {host}: {remark}', file=sys.stderr)
+                errors.append(f'{host}: {remark}')
+                break
+            return raw
+    raise OverpassBusy('\n  '.join(errors))
+
+
+def split_bbox(bbox, size):
+    """Ділить область на квадрати приблизно size × size градусів."""
+    s, w, n, e = bbox
+    rows = max(1, math.ceil((n - s) / size - 1e-9))
+    cols = max(1, math.ceil((e - w) / size - 1e-9))
+    dlat, dlon = (n - s) / rows, (e - w) / cols
+    return [(s + i * dlat, w + j * dlon, s + (i + 1) * dlat, w + (j + 1) * dlon)
+            for i in range(rows) for j in range(cols)]
+
+
+def download_overpass(bbox, highways, save_to=None, tile=0.1):
+    """Завантажує область частинами; частину, з якою сервер не впорався, ділить ще на 4."""
+    queue = [(t, 0) for t in split_bbox(bbox, tile)]
+    total = len(queue)
+    raws = []
+    done = 0
+    if total > 1:
+        print(f'Область поділено на {total} частин(и).', file=sys.stderr)
+    while queue:
+        part, depth = queue.pop(0)
+        done += 1
+        s, w, n, e = part
+        print(f'[{len(raws) + 1}] Завантаження {s:.3f},{w:.3f},{n:.3f},{e:.3f}…', file=sys.stderr)
         try:
-            with urllib.request.urlopen(req, timeout=900) as r:
-                buf = io.BytesIO()
-                while chunk := r.read(1 << 20):
-                    buf.write(chunk)
-                    print(f'\r  отримано {buf.tell() / 1e6:.1f} МБ', end='', file=sys.stderr)
-                print(file=sys.stderr)
-        except urllib.error.HTTPError as err:
-            hint = {429: 'забагато запитів, зачекайте кілька хвилин',
-                    504: 'сервер перевантажений', 400: 'помилка в запиті'}.get(err.code, err.reason)
-            print(f'  {host}: HTTP {err.code} ({hint})', file=sys.stderr)
-            errors.append(f'{host}: HTTP {err.code}')
-            continue
-        except (urllib.error.URLError, TimeoutError, OSError) as err:
-            print(f'  {host}: {err}', file=sys.stderr)
-            errors.append(f'{host}: {err}')
-            continue
-        raw = buf.getvalue()
-        # При перевищенні ліміту Overpass повертає XML із <remark> замість даних.
-        if b'<remark>' in raw[-2000:] and b'<way' not in raw:
-            remark = raw[raw.rfind(b'<remark>') + 8:raw.rfind(b'</remark>')].decode(errors='replace').strip()
-            print(f'  {host}: {remark}', file=sys.stderr)
-            errors.append(f'{host}: {remark}')
-            continue
-        if save_to:
-            with open(save_to, 'wb') as f:
+            raws.append(fetch_overpass(part, highways))
+        except OverpassBusy as err:
+            if depth < 2:
+                print('    ділю цю частину на 4 менші й пробую знову', file=sys.stderr)
+                half = max(n - s, e - w) / 2
+                queue[:0] = [(t, depth + 1) for t in split_bbox(part, half)]
+                continue
+            sys.exit(f'Не вдалося завантажити дані з жодного сервера Overpass:\n  {err}\n'
+                     'Спробуйте пізніше (сервери бувають перевантажені) або зменште область.')
+        if queue:
+            time.sleep(2)  # не перевантажуємо безкоштовні сервери
+
+    if save_to:
+        if len(raws) == 1:
+            paths = [save_to]
+        else:
+            stem, ext = os.path.splitext(save_to)
+            paths = [f'{stem}-{i + 1:02d}{ext or ".osm"}' for i in range(len(raws))]
+        for path, raw in zip(paths, raws):
+            with open(path, 'wb') as f:
                 f.write(raw)
-            print(f'  сирі дані збережено в {save_to} (наступного разу: build_graph.py {save_to} …)',
-                  file=sys.stderr)
-        return io.BytesIO(raw)
-    sys.exit('Не вдалося завантажити дані з жодного сервера Overpass:\n  ' + '\n  '.join(errors) +
-             '\nСпробуйте пізніше або зменште область (--overpass).')
+        again = paths[0] if len(paths) == 1 else f'"{os.path.splitext(save_to)[0]}-*.osm"'
+        print(f'Сирі дані збережено ({len(paths)} файл(ів)). Наступного разу без завантаження:\n'
+              f'  python tools/build_graph.py {again} -o <файл.json> --name "…"', file=sys.stderr)
+    return [io.BytesIO(r) for r in raws]
 
 
 def is_drivable(tags, highways):
@@ -128,16 +185,21 @@ def way_flags(tags):
     return flags
 
 
-def parse_osm(stream, highways):
-    coords = {}
-    ways = []
+def parse_osm(stream, highways, coords=None, ways=None, seen=None):
+    """Читає OSM XML. Можна викликати кілька разів для частин однієї області —
+    дороги, що потрапили в кілька частин, додаються лише раз (за id)."""
+    coords = {} if coords is None else coords
+    ways = [] if ways is None else ways
+    seen = set() if seen is None else seen
     for _, el in ET.iterparse(stream, events=('end',)):
         if el.tag == 'node':
             coords[int(el.get('id'))] = (float(el.get('lat')), float(el.get('lon')))
             el.clear()
         elif el.tag == 'way':
+            wid = int(el.get('id'))
             tags = {t.get('k'): t.get('v') for t in el.findall('tag')}
-            if is_drivable(tags, highways):
+            if wid not in seen and is_drivable(tags, highways):
+                seen.add(wid)
                 refs = [int(nd.get('ref')) for nd in el.findall('nd')]
                 ways.append({
                     'name': tags.get('name:uk') or tags.get('name') or '',
@@ -263,25 +325,31 @@ def parse_bbox(text):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('input', nargs='?', help='.osm, .osm.gz або .osm.bz2')
+    ap.add_argument('input', nargs='*', help='.osm, .osm.gz або .osm.bz2 (можна кілька або шаблон *.osm)')
     ap.add_argument('-o', '--output', required=True)
     ap.add_argument('--name', default='Карта')
     ap.add_argument('--bbox', type=parse_bbox, help='обрізати: south,west,north,east')
     ap.add_argument('--overpass', type=parse_bbox, metavar='BBOX', help='завантажити область з Overpass API')
     ap.add_argument('--save-osm', metavar='FILE', help='зберегти завантажені з Overpass дані, щоб не качати повторно')
+    ap.add_argument('--tile', type=float, default=0.1,
+                    help='розмір частини для завантаження з Overpass, градуси (типово 0.1 ≈ 11×7 км)')
     ap.add_argument('--include-service', action='store_true', help='включати проїзди (highway=service)')
     ap.add_argument('--simplify', type=float, default=5.0, help='допуск спрощення геометрії, м (0 — вимкнути)')
     args = ap.parse_args()
 
     highways = set(CAR_HIGHWAYS) | ({'service'} if args.include_service else set())
     if args.overpass:
-        stream = download_overpass(args.overpass, sorted(highways), args.save_osm)
+        streams = download_overpass(args.overpass, sorted(highways), args.save_osm, args.tile)
     elif args.input:
-        stream = open_input(args.input)
+        # PowerShell не розгортає шаблони на зразок kyiv-*.osm, тому робимо це самі.
+        paths = [p for pat in args.input for p in (sorted(glob.glob(pat)) or [pat])]
+        streams = (open_input(p) for p in paths)
     else:
         ap.error('вкажіть вхідний файл або --overpass')
 
-    coords, ways = parse_osm(stream, highways)
+    coords, ways, seen = {}, [], set()
+    for stream in streams:
+        parse_osm(stream, highways, coords, ways, seen)
     graph = build(coords, ways, args.name, args.bbox or args.overpass, args.simplify)
     with open(args.output, 'w', encoding='utf-8') as f:
         json.dump(graph, f, ensure_ascii=False, separators=(',', ':'))

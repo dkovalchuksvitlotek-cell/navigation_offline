@@ -72,8 +72,12 @@ python3 -m http.server 8080     # або: npm run serve
 геометрію, але зберігає перехрестя, і лишає найбільшу зв'язну частину мережі.
 
 ```bash
-# невелика область напряму з Overpass API (south,west,north,east)
-python3 tools/build_graph.py --overpass 50.43,30.49,50.46,30.54 -o data/kyiv-center.json --name "Київ, центр"
+# область напряму з Overpass API (south,west,north,east); велика область
+# автоматично качається частинами ~0.1° (якщо сервер не встигає — частина ділиться ще на 4)
+python3 tools/build_graph.py --overpass 50.21,30.23,50.59,30.83 -o kyiv.json --name "Київ" --save-osm kyiv.osm
+
+# повторна збірка зі збережених частин без завантаження
+python3 tools/build_graph.py "kyiv-*.osm" -o kyiv.json --name "Київ"
 
 # місто чи область з дампу Geofabrik (потрібен osmium-tool)
 osmium extract -b 30.2,50.2,30.9,50.6 ukraine-latest.osm.pbf -o kyiv.osm.pbf

@@ -50,5 +50,45 @@ class BuildGraphTest(unittest.TestCase):
         self.assertEqual(len(g['nodes']) // 2, 5)
 
 
+class TiledDownloadTest(unittest.TestCase):
+    """Завантаження великої області частинами (сервер Overpass імітується)."""
+
+    def setUp(self):
+        import build_graph
+        self.bg = build_graph
+        self.calls = []
+
+        def fake_fetch(bbox, highways):
+            s, w, n, e = bbox
+            self.calls.append(bbox)
+            if n - s > 0.06:  # «великі» частини сервер не встигає обробити
+                raise build_graph.OverpassBusy('HTTP 504')
+            # Одна й та сама дорога потрапляє в кожну частину — має додатися лише раз.
+            return OSM.encode()
+
+        self._orig = build_graph.fetch_overpass
+        build_graph.fetch_overpass = fake_fetch
+        build_graph.time.sleep = lambda _: None
+
+    def tearDown(self):
+        self.bg.fetch_overpass = self._orig
+
+    def test_split_retry_merge_and_reload(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            save = os.path.join(tmp, 'city.osm')
+            streams = self.bg.download_overpass((50.0, 30.0, 50.1, 30.2), ['residential'], save, tile=0.1)
+            # 0.1×0.2 → 2 частини по 0.1, кожна «завелика» → по 4 частини 0.05
+            self.assertEqual(len(streams), 8)
+            self.assertEqual(sum(1 for c in self.calls if c[2] - c[0] > 0.06), 2)
+            coords, ways, seen = {}, [], set()
+            for st in streams:
+                self.bg.parse_osm(st, set(CAR_HIGHWAYS), coords, ways, seen)
+            self.assertEqual(len(ways), 4)  # дублікати з різних частин відкинуто
+            saved = sorted(os.listdir(tmp))
+            self.assertEqual(saved[0], 'city-01.osm')
+            self.assertEqual(len(saved), 8)
+
+
 if __name__ == '__main__':
     unittest.main()
