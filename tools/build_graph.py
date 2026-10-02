@@ -21,6 +21,7 @@ import io
 import json
 import math
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -31,7 +32,14 @@ CAR_HIGHWAYS = [
     'unclassified', 'residential', 'living_street',
 ]
 FLAG_ONEWAY, FLAG_ONEWAY_REVERSE, FLAG_ROUNDABOUT = 1, 2, 4
-OVERPASS_URL = 'https://overpass-api.de/api/interpreter'
+# Основний сервер і дзеркала: якщо один перевантажений, пробуємо наступний.
+OVERPASS_URLS = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.private.coffee/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter',
+]
+# Overpass відхиляє запити зі стандартним User-Agent Python (HTTP 406).
+USER_AGENT = 'navigation_offline/0.1 (+https://github.com/dkovalchuksvitlotek-cell/navigation_offline)'
 
 
 def open_input(path):
@@ -42,17 +50,55 @@ def open_input(path):
     return open(path, 'rb')
 
 
-def download_overpass(bbox, highways):
+def download_overpass(bbox, highways, save_to=None):
     s, w, n, e = bbox
     query = (
-        '[out:xml][timeout:300];'
+        '[out:xml][timeout:600][maxsize:1073741824];'
         f'way["highway"~"^({"|".join(highways)})$"]({s},{w},{n},{e});'
         '(._;>;);out body;'
     )
     data = urllib.parse.urlencode({'data': query}).encode()
-    print('Завантаження з Overpass API…', file=sys.stderr)
-    with urllib.request.urlopen(OVERPASS_URL, data=data, timeout=600) as r:
-        return io.BytesIO(r.read())
+    errors = []
+    for url in OVERPASS_URLS:
+        host = urllib.parse.urlparse(url).netloc
+        print(f'Завантаження з {host}… (для великого міста це може тривати кілька хвилин)', file=sys.stderr)
+        req = urllib.request.Request(url, data=data, headers={
+            'User-Agent': USER_AGENT,
+            'Accept': '*/*',
+            'Content-Type': 'application/x-www-form-urlencoded',
+        })
+        try:
+            with urllib.request.urlopen(req, timeout=900) as r:
+                buf = io.BytesIO()
+                while chunk := r.read(1 << 20):
+                    buf.write(chunk)
+                    print(f'\r  отримано {buf.tell() / 1e6:.1f} МБ', end='', file=sys.stderr)
+                print(file=sys.stderr)
+        except urllib.error.HTTPError as err:
+            hint = {429: 'забагато запитів, зачекайте кілька хвилин',
+                    504: 'сервер перевантажений', 400: 'помилка в запиті'}.get(err.code, err.reason)
+            print(f'  {host}: HTTP {err.code} ({hint})', file=sys.stderr)
+            errors.append(f'{host}: HTTP {err.code}')
+            continue
+        except (urllib.error.URLError, TimeoutError, OSError) as err:
+            print(f'  {host}: {err}', file=sys.stderr)
+            errors.append(f'{host}: {err}')
+            continue
+        raw = buf.getvalue()
+        # При перевищенні ліміту Overpass повертає XML із <remark> замість даних.
+        if b'<remark>' in raw[-2000:] and b'<way' not in raw:
+            remark = raw[raw.rfind(b'<remark>') + 8:raw.rfind(b'</remark>')].decode(errors='replace').strip()
+            print(f'  {host}: {remark}', file=sys.stderr)
+            errors.append(f'{host}: {remark}')
+            continue
+        if save_to:
+            with open(save_to, 'wb') as f:
+                f.write(raw)
+            print(f'  сирі дані збережено в {save_to} (наступного разу: build_graph.py {save_to} …)',
+                  file=sys.stderr)
+        return io.BytesIO(raw)
+    sys.exit('Не вдалося завантажити дані з жодного сервера Overpass:\n  ' + '\n  '.join(errors) +
+             '\nСпробуйте пізніше або зменште область (--overpass).')
 
 
 def is_drivable(tags, highways):
@@ -222,13 +268,14 @@ def main():
     ap.add_argument('--name', default='Карта')
     ap.add_argument('--bbox', type=parse_bbox, help='обрізати: south,west,north,east')
     ap.add_argument('--overpass', type=parse_bbox, metavar='BBOX', help='завантажити область з Overpass API')
+    ap.add_argument('--save-osm', metavar='FILE', help='зберегти завантажені з Overpass дані, щоб не качати повторно')
     ap.add_argument('--include-service', action='store_true', help='включати проїзди (highway=service)')
     ap.add_argument('--simplify', type=float, default=5.0, help='допуск спрощення геометрії, м (0 — вимкнути)')
     args = ap.parse_args()
 
     highways = set(CAR_HIGHWAYS) | ({'service'} if args.include_service else set())
     if args.overpass:
-        stream = download_overpass(args.overpass, sorted(highways))
+        stream = download_overpass(args.overpass, sorted(highways), args.save_osm)
     elif args.input:
         stream = open_input(args.input)
     else:
